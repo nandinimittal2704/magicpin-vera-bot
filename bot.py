@@ -242,6 +242,7 @@ async def whatsapp_ui_simulator():
         }
 
         function sendQuickReply(text) {
+            currentConvId = "conv_test_" + Date.now();
             document.getElementById('user-input').value = text;
             sendMessage();
         }
@@ -374,7 +375,7 @@ async def receive_context(req: ContextPushRequest):
 
     key = (req.scope, req.context_id)
     existing = CONTEXT_STORE.get(key)
-    if existing and existing["version"] >= req.version:
+    if existing and existing["version"] > req.version:
         return JSONResponse(
             status_code=409,
             content={"accepted": False, "reason": "stale_version", "current_version": existing["version"]}
@@ -487,7 +488,20 @@ async def periodic_tick(req: TickRequest):
         if conv_id not in CONVERSATION_STORE:
             state = ConversationState(conversation_id=conv_id, merchant_id=merchant_id, customer_id=customer_id)
             CONVERSATION_STORE[conv_id] = state
-        CONVERSATION_STORE[conv_id].add_turn(composed.get("send_as", "vera"), composed.get("body", ""))
+        else:
+            state = CONVERSATION_STORE[conv_id]
+
+        # Store pending_action on state if CTA is not 'none'
+        if composed.get("cta") != "none":
+            offer_desc = trg_payload.get("payload", {}).get("headline") or trg_payload.get("payload", {}).get("event") or trg_payload.get("kind") or "promotional update"
+            state.set_pending_action(
+                trigger_id=trg_id,
+                offer_description=offer_desc,
+                cta_type=composed.get("cta", "binary"),
+                suppression_key=composed.get("suppression_key", suppression_key)
+            )
+
+        state.add_turn(composed.get("send_as", "vera"), composed.get("body", ""))
 
     return {"actions": actions}
 
@@ -517,7 +531,8 @@ async def handle_merchant_reply(req: ReplyRequest):
         category=category,
         merchant=merchant,
         trigger=None,
-        customer=customer
+        customer=customer,
+        fired_suppressions=FIRED_SUPPRESSIONS
     )
 
     return response_action
