@@ -13,6 +13,7 @@ Exposes 5 required HTTP endpoints (plus /v1/teardown & /ui WhatsApp simulator):
 
 import time
 import os
+import json
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -509,6 +510,7 @@ async def periodic_tick(req: TickRequest):
 # 3. POST /v1/reply
 @app.post("/v1/reply")
 async def handle_merchant_reply(req: ReplyRequest):
+    print(f"\n[DEBUG /v1/reply INCOMING] conv_id={req.conversation_id}, merchant_id={req.merchant_id}, message='{req.message}', turn={req.turn_number}", flush=True)
     conv_id = req.conversation_id
     state = CONVERSATION_STORE.get(conv_id)
     if not state:
@@ -535,6 +537,7 @@ async def handle_merchant_reply(req: ReplyRequest):
         fired_suppressions=FIRED_SUPPRESSIONS
     )
 
+    print(f"[DEBUG /v1/reply OUTGOING] response={json.dumps(response_action)}\n", flush=True)
     return response_action
 
 

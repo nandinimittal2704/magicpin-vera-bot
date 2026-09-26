@@ -20,29 +20,20 @@ Author: magicpin AI Challenge Team
 # ██████  CONFIGURATION - EDIT THIS SECTION ██████
 # =============================================================================
 
-# Your bot's URL (where your bot is running)
-BOT_URL = "http://localhost:8080"
-
-# Choose your LLM provider: "openai", "anthropic", "gemini", "deepseek", "groq", "ollama", "openrouter"
-LLM_PROVIDER = "openai"
-
-# Your API key (paste your key here)
-LLM_API_KEY = ""  # <-- PUT YOUR API KEY HERE
-
-# Model to use (leave empty for default, or specify like "gpt-4o", "claude-3-5-sonnet-20241022", etc.)
-LLM_MODEL = ""  # <-- Optional: specify model or leave empty for default
-
-# For Ollama only: local server URL
-OLLAMA_URL = "http://localhost:11434"
-
-# Which test to run by default
-TEST_SCENARIO = "all"
-
-# =============================================================================
-# ██████  END OF CONFIGURATION - DON'T EDIT BELOW THIS LINE ██████
-# =============================================================================
-
 import os
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+BOT_URL = os.getenv("BOT_URL", "http://localhost:8080")
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini")
+LLM_API_KEY = os.getenv("LLM_API_KEY", os.getenv("GEMINI_API_KEY", ""))
+LLM_MODEL = os.getenv("LLM_MODEL", "gemini-1.5-flash")
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+TEST_SCENARIO = os.getenv("TEST_SCENARIO", "all")
+
 import sys
 import json
 import time
