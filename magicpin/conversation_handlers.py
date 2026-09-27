@@ -10,14 +10,13 @@ Distinguishes 6 intent categories:
 6. AMBIGUOUS — unclear replies -> ask clarifying question, do NOT default to action mode.
 """
 
-import os
+import json
 import re
 import time
-import json
-import traceback
-import urllib.request
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, field
+
+from composer import call_llm_gemini
 
 
 @dataclass
@@ -190,42 +189,18 @@ def classify_intent_rules(message: str, prior_replies: Optional[List[str]] = Non
 
 def classify_intent_llm(message: str) -> Optional[str]:
     """LLM classification step (temperature=0) for ambiguous messages."""
-    api_key = os.getenv("ANTHROPIC_API_KEY") or os.getenv("LLM_API_KEY")
-    if not api_key:
-        return None
-
     try:
-        url = "https://api.anthropic.com/v1/messages"
-        headers = {
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json"
-        }
-        system_prompt = (
+        prompt = (
             "You are a strict intent classifier for WhatsApp merchant replies. "
             "Classify the given message into EXACTLY ONE category: "
             "[EXPLICIT_POSITIVE_INTENT, DEFERRAL, AUTO_REPLY, EXPLICIT_DECLINE, QUESTION, AMBIGUOUS]. "
-            "Respond ONLY with valid JSON: {\"intent\": \"<category>\"}"
+            "Respond ONLY with valid JSON: {\"intent\": \"<category>\"}. "
+            f"Message: {json.dumps(message)}"
         )
-        body = {
-            "model": os.getenv("LLM_MODEL", "claude-3-5-sonnet-20241022"),
-            "max_tokens": 100,
-            "temperature": 0,
-            "system": system_prompt,
-            "messages": [{"role": "user", "content": f"Classify this message: '{message}'"}]
-        }
-
-        req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers)
-        with urllib.request.urlopen(req, timeout=10) as response:
-            res_data = json.loads(response.read().decode("utf-8"))
-            content_text = res_data["content"][0]["text"]
-            match = re.search(r'\{[\s\S]*\}', content_text)
-            if match:
-                data = json.loads(match.group())
-                return data.get("intent")
+        data = json.loads(call_llm_gemini(prompt))
+        return data.get("intent")
     except Exception as e:
-        print(f"[IntentClassifier] LLM classification error: {e}")
-        traceback.print_exc()
+        print(f"[IntentClassifier] Gemini classification error: {e}", flush=True)
 
     return None
 
@@ -275,11 +250,13 @@ def handle_reply(
     # BRANCH 1: EXPLICIT_DECLINE
     if intent == INTENT_EXPLICIT_DECLINE or state.unanswered_nudge_count >= 3:
         state.status = "ended"
-        if state.pending_action and state.pending_action.get("suppression_key") and fired_suppressions is not None:
-            fired_suppressions.add(state.pending_action["suppression_key"])
+        suppression_key = state.pending_action.get("suppression_key") if state.pending_action else None
+        if suppression_key and fired_suppressions is not None:
+            fired_suppressions.add(suppression_key)
         state.clear_pending_action()
         return {
             "action": "end",
+            "suppression_key": suppression_key,
             "rationale": "Merchant explicitly declined or requested stop. Gracefully exiting conversation."
         }
 
@@ -309,9 +286,13 @@ def handle_reply(
                 "rationale": "Detected repeated canned auto-reply (2+ occurrences). Exiting politely to avoid burning message quota."
             }
         else:
+            offer_desc = (
+                state.pending_action.get("offer_description")
+                if state.pending_action else "your request"
+            )
             reply_body = (
-                f"Samajh gayi. Manager/Owner tak pahunchane se pehle, kya aap khud dekhna chahingi "
-                f"ki exact kya optimization missing hai Google Business listing pe? 2 minute ka kaam hai. Chalega?"
+                f"Thank you. I’ll ask a human teammate to follow up with you about {offer_desc} "
+                f"so they can take it from here."
             )
             state.add_turn("vera", reply_body)
             return {
@@ -326,7 +307,7 @@ def handle_reply(
         if state.pending_action:
             offer_desc = state.pending_action.get("offer_description", "your proposed campaign")
             # Confirm proceeding with THAT SPECIFIC pending_action.offer_description!
-            reply_body = f"Starting this now — I'll confirm once it's live for {offer_desc} at {m_name}."
+            reply_body = f"Preparing {offer_desc} for {m_name}; I'll confirm when the draft is ready."
             state.clear_pending_action()  # Clear resolved pending action
             state.add_turn("vera", reply_body)
             return {
@@ -361,12 +342,32 @@ def handle_reply(
                 f"We track local competitor openings (like new listings 1.3km away) to keep your profile views ahead."
             )
         else:
-            pending_desc = f" regarding '{state.pending_action['offer_description']}'" if state.pending_action else ""
-            reply_body = (
-                f"Regarding your query about {m_name}{pending_desc}: "
-                f"your current performance is {views} views and {calls} calls in {locality}. "
-                f"Let me know if you need specific details on our active offers."
+            pending_desc = state.pending_action.get("offer_description", "") if state.pending_action else ""
+            digest_item = next(
+                (
+                    item for item in (category or {}).get("digest", [])
+                    if item.get("title") and item["title"] in pending_desc
+                ),
+                None,
             )
+            if digest_item:
+                cohort_size = (merchant or {}).get("customer_aggregate", {}).get("high_risk_adult_count")
+                cohort = f"your {cohort_size} high-risk adult patients" if cohort_size else "your high-risk adult patients"
+                sample = digest_item.get("trial_n")
+                sample_text = f" (n={sample})" if sample else ""
+                reply_body = (
+                    f"For {cohort}, {digest_item.get('source', 'the research digest')}{sample_text} "
+                    f"summarizes this finding: {digest_item.get('summary', digest_item.get('title', 'a relevant finding'))} "
+                    "Clinically, this supports reviewing recall intervals for the high-risk group; it does not imply "
+                    "the same benefit for low-risk patients or require changing every patient's schedule."
+                )
+            else:
+                pending_suffix = f" regarding '{pending_desc}'" if pending_desc else ""
+                reply_body = (
+                    f"Regarding your query about {m_name}{pending_suffix}: "
+                    f"your current performance is {views} views and {calls} calls in {locality}. "
+                    "I can clarify the specific update if you tell me which part you mean."
+                )
 
         state.add_turn("vera", reply_body)
         return {

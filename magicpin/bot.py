@@ -19,6 +19,9 @@ from typing import Dict, Any, List, Optional
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, HTMLResponse
 from pydantic import BaseModel, Field
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from composer import compose
 from conversation_handlers import ConversationState, handle_reply, MERCHANT_AUTO_REPLY_COUNTS
@@ -30,6 +33,12 @@ app = FastAPI(
 )
 
 START_TIME = time.time()
+
+
+@app.on_event("startup")
+async def log_llm_key_presence():
+    key_status = {"GEMINI_API_KEY": bool(os.getenv("GEMINI_API_KEY"))}
+    print(f"[Startup] LLM key presence (values never logged): {json.dumps(key_status)}", flush=True)
 
 # In-memory context store: (scope, context_id) -> {"version": int, "payload": dict, "delivered_at": str}
 CONTEXT_STORE: Dict[tuple[str, str], Dict[str, Any]] = {}
@@ -495,6 +504,14 @@ async def periodic_tick(req: TickRequest):
         # Store pending_action on state if CTA is not 'none'
         if composed.get("cta") != "none":
             offer_desc = trg_payload.get("payload", {}).get("headline") or trg_payload.get("payload", {}).get("event") or trg_payload.get("kind") or "promotional update"
+            if trg_payload.get("kind") == "research_digest":
+                digest_id = trg_payload.get("payload", {}).get("top_item_id")
+                digest_item = next(
+                    (item for item in category.get("digest", []) if item.get("id") == digest_id),
+                    {},
+                )
+                item_title = digest_item.get("title", "the research finding")
+                offer_desc = f"patient WhatsApp explainer about {item_title}"
             state.set_pending_action(
                 trigger_id=trg_id,
                 offer_description=offer_desc,
@@ -562,7 +579,7 @@ async def metadata():
     return {
         "team_name": "Team Vera AI",
         "team_members": ["Vera Developer"],
-        "model": "claude-3-5-sonnet-20241022",
+        "model": os.getenv("LLM_MODEL", "gemini-2.0-flash"),
         "approach": "4-Context LLM Composer with Routing, Post-Validation, & Multi-Turn State Machine",
         "contact_email": "vera@magicpin.in",
         "version": "1.0.0",
@@ -582,5 +599,5 @@ async def teardown_state():
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", 8080))
+    port = int(os.getenv("PORT", 8081))
     uvicorn.run(app, host="0.0.0.0", port=port)

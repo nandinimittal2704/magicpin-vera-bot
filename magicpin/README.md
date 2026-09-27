@@ -17,7 +17,7 @@ The Vera architecture consists of three decoupled layers:
 2. **LLM Composition & Routing Layer (`composer.py`)**:
    - **4-Context Serialization**: Fuses `CategoryContext`, `MerchantContext`, `TriggerContext`, and optional `CustomerContext`.
    - **Trigger Routing**: Selects context-aware prompt variants matching the trigger's `kind` (e.g. `research_digest`, `perf_dip`, `recall_due`, `festival_upcoming`).
-   - **LLM Engine**: Calls Anthropic Claude (`claude-3-5-sonnet-20241022`) at `temperature=0` for deterministic structured JSON output (`body`, `cta`, `send_as`, `suppression_key`, `rationale`).
+   - **LLM Engine**: Calls Google Gemini (`gemini-2.0-flash` by default) at `temperature=0` with JSON MIME output for deterministic structured responses (`body`, `cta`, `send_as`, `suppression_key`, `rationale`).
    - **Post-LLM Validator & Fallback Engine**: Validates length, single CTA constraints, category taboo words, anti-repetition rules, and provides a guaranteed 10/10 deterministic fallback composition if LLM API is unavailable.
 
 3. **Multi-Turn State Machine (`conversation_handlers.py`)**:
@@ -57,8 +57,8 @@ To deploy this repository to **Render** and get the public HTTPS URL required fo
    - **Region**: Singapore or Frankfurt (or nearest region).
    - **Branch**: `main`.
 4. **Environment Variables**:
-   - Add `ANTHROPIC_API_KEY`: `<your_anthropic_api_key>` (optional; fallback engine operates offline if omitted).
-   - `PORT`: `8080` (or leave default, Dockerfile uses `${PORT:-8080}`).
+   - Add `GEMINI_API_KEY` as an environment variable. The deterministic fallback is used only after Gemini calls fail and logs an ERROR-level message.
+   - `PORT`: `8081` (or leave default; the container uses the platform-provided `PORT` when set).
 5. **Deploy & Copy Public URL**:
    - Click **Create Web Service**.
    - Render will build the Docker container and deploy the app.

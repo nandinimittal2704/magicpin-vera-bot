@@ -23,15 +23,13 @@ Follows the 12 Hard Rules for Vera:
 
 import os
 import json
+import logging
 import re
-import urllib.request
-import urllib.error
+import time
 from typing import Dict, Any, Optional, List
 
-# Anthropic API defaults
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY") or os.getenv("LLM_API_KEY", "")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-DEFAULT_MODEL = os.getenv("LLM_MODEL", "claude-3-5-sonnet-20241022")
+logger = logging.getLogger(__name__)
+DEFAULT_MODEL = os.getenv("LLM_MODEL", "gemini-2.0-flash")
 
 
 def build_system_prompt(category: Dict[str, Any], trigger_kind: str) -> str:
@@ -66,13 +64,14 @@ SYSTEM RULES:
 1. ANCHOR ON CONCRETE FACTS: Every message MUST contain at least one verifiable fact pulled directly from the provided contexts (exact numbers, percentages, ratings, prices like ₹299, trial sample size like 2100 patients, date, or source headline). NEVER use generic fluff like "10% off" or "grow your business".
 2. CATEGORY VOICE: {voice_instructions}
 3. MERCHANT FIT: Personalize to this specific merchant's real numbers, real active offers, real location/locality. NEVER invent data not present in payload.
-4. TRIGGER RELEVANCE: Clearly state WHY THIS MESSAGE IS BEING SENT NOW by explicitly referencing the trigger event.
-5. ENGAGEMENT COMPULSION: Use at least one lever: Social Proof ("3 dentists in your locality did X"), Asking the Merchant a question, Loss Aversion, Curiosity, or Effort Externalization ("I've drafted X — reply YES to publish").
-6. SINGLE PRIMARY CTA: Use exactly ONE clear CTA. Output "cta" as "binary" (YES/STOP), "open_ended" (question), or "none".
-7. LANGUAGE MATCH: If merchant/customer prefers Hindi or hi-en mix, smoothly mix natural Hinglish code-mix (e.g., "Aapke clinic ke liye...", "2 slots ready hain").
-8. NO FABRICATION: Do not invent fake research studies, competitor names, or prices not in the payload.
-9. CONCISE: No long preambles ("Hope you are doing well"). Get straight to the point.
-10. REPETITION: Never output a message identical to prior turns in conversation history.
+4. TRIGGER RELEVANCE: Clearly state WHY THIS MESSAGE IS BEING SENT NOW by explicitly referencing the trigger event and its payload. Keep each number attached to its actual source and time window. Never substitute a category peer statistic for a trigger baseline.
+5. CONTEXT SEPARATION: Use only digest items explicitly linked to a research_digest trigger. For other trigger kinds, do not introduce unrelated research or category digest facts.
+6. ENGAGEMENT COMPULSION: Use at least one lever: Social Proof ("3 dentists in your locality did X"), Asking the Merchant a question, Loss Aversion, Curiosity, or Effort Externalization ("I've drafted X — reply YES to publish").
+7. SINGLE PRIMARY CTA: Use exactly ONE clear ask. For a binary ask, put YES/STOP in that same sentence; never append a second "Reply YES" or another question. Output "cta" as "binary" (YES/STOP), "open_ended" (question), or "none".
+8. LANGUAGE MATCH: If merchant/customer prefers Hindi or hi-en mix, smoothly mix natural Hinglish code-mix (e.g., "Aapke clinic ke liye...", "2 slots ready hain").
+9. NO FABRICATION: Do not invent fake research studies, competitor names, or prices not in the payload.
+10. CONCISE: No long preambles ("Hope you are doing well"). Get straight to the point.
+11. REPETITION: Never output a message identical to prior turns in conversation history.
 
 OUTPUT CONTRACT:
 Return ONLY valid JSON with keys:
@@ -96,6 +95,38 @@ def build_user_prompt(
     
     # Send_as detection
     send_as = "merchant_on_behalf" if (customer or trigger.get("scope") == "customer" or trigger.get("customer_id")) else "vera"
+    trigger_kind = trigger.get("kind", "")
+    trigger_payload = trigger.get("payload", {})
+
+    digest_items = []
+    trigger_guidance = "Anchor the message on this trigger's payload and relevant merchant facts."
+    if trigger_kind == "research_digest":
+        digest_id = trigger_payload.get("top_item_id")
+        digest_items = [item for item in category.get("digest", []) if item.get("id") == digest_id]
+        trigger_guidance = (
+            "This is a research digest. Cite only the digest item matched to trigger.payload.top_item_id, "
+            "and propose one patient-facing WhatsApp explainer about that exact finding."
+        )
+    elif trigger_kind == "perf_dip":
+        metric = trigger_payload.get("metric", "metric")
+        delta_pct = abs(trigger_payload.get("delta_pct", 0) * 100)
+        window = trigger_payload.get("window", "")
+        baseline = trigger_payload.get("vs_baseline", "")
+        trigger_guidance = (
+            "This is a performance dip. State that {metric} fell {delta_pct:g}% over {window} "
+            f"against the trigger baseline of {baseline}. Do not call that baseline a peer average, "
+            "do not add unrelated research, and do not invent or propose an offer or price not listed "
+            "as an active merchant offer. If there is no active offer, ask whether the merchant wants "
+            "to review the performance details."
+        )
+    elif trigger_kind in {"festival_upcoming", "category_seasonal", "seasonal_perf_dip"}:
+        event = trigger_payload.get("festival") or trigger_payload.get("season") or "the seasonal event"
+        trigger_guidance = (
+            f"This is a seasonal trigger for {event}. Anchor the message on this trigger's actual "
+            "event/date and the merchant's active offers or performance facts. Do not claim local "
+            "search growth or demand percentages unless that exact figure appears in this trigger payload. "
+            "Do not use unrelated category trend percentages."
+        )
 
     prompt_data = {
         "send_as_target": send_as,
@@ -103,7 +134,7 @@ def build_user_prompt(
             "slug": category.get("slug"),
             "voice": category.get("voice"),
             "peer_stats": category.get("peer_stats"),
-            "top_digest_items": category.get("digest", [])[:2],
+            "top_digest_items": digest_items,
             "seasonal_beats": category.get("seasonal_beats", [])[:2],
             "trend_signals": category.get("trend_signals", [])[:2]
         },
@@ -122,7 +153,8 @@ def build_user_prompt(
             "payload": trigger.get("payload"),
             "urgency": trigger.get("urgency"),
             "suppression_key": trigger.get("suppression_key")
-        }
+        },
+        "trigger_guidance": trigger_guidance
     }
 
     if customer:
@@ -140,67 +172,37 @@ def build_user_prompt(
     return f"COMPOSE MESSAGE FROM THESE CONTEXTS:\n{json.dumps(prompt_data, indent=2)}\n\nRespond ONLY with valid JSON."
 
 
-def call_llm_anthropic(system_prompt: str, user_prompt: str) -> Optional[Dict[str, Any]]:
-    """Calls Anthropic Claude API via HTTP urllib request."""
-    if not ANTHROPIC_API_KEY:
-        return None
+def call_llm_gemini(prompt: str) -> str:
+    """Call Gemini for deterministic JSON text, retrying one failed API call."""
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY is not configured")
 
-    try:
-        url = "https://api.anthropic.com/v1/messages"
-        headers = {
-            "x-api-key": ANTHROPIC_API_KEY,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json"
-        }
-        body = {
-            "model": DEFAULT_MODEL,
-            "max_tokens": 1000,
-            "temperature": 0,  # Deterministic
-            "system": system_prompt,
-            "messages": [{"role": "user", "content": user_prompt}]
-        }
+    import google.generativeai as genai
 
-        req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers)
-        with urllib.request.urlopen(req, timeout=25) as response:
-            res_data = json.loads(response.read().decode("utf-8"))
-            content_text = res_data["content"][0]["text"]
-            match = re.search(r'\{[\s\S]*\}', content_text)
-            if match:
-                return json.loads(match.group())
-    except Exception as e:
-        print(f"[Composer] Anthropic LLM call error: {e}")
-    return None
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel(DEFAULT_MODEL)
+    last_error = None
+    for attempt in range(2):
+        try:
+            print(f"[DEBUG Gemini full prompt]\n{prompt}", flush=True)
+            response = model.generate_content(
+                prompt,
+                generation_config=genai.GenerationConfig(
+                    temperature=0,
+                    response_mime_type="application/json",
+                ),
+            )
+            raw_text = response.text or ""
+            print(f"[DEBUG Gemini raw response] {raw_text}", flush=True)
+            return raw_text
+        except Exception as error:
+            last_error = error
+            logger.warning("Gemini API call failed (attempt %s/2): %s", attempt + 1, error)
+            if attempt == 0:
+                time.sleep(1)
 
-
-def call_llm_openai(system_prompt: str, user_prompt: str) -> Optional[Dict[str, Any]]:
-    """Calls OpenAI API if configured."""
-    if not OPENAI_API_KEY:
-        return None
-
-    try:
-        url = "https://api.openai.com/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        body = {
-            "model": "gpt-4o-mini",
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            "temperature": 0,
-            "response_format": {"type": "json_object"}
-        }
-
-        req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers)
-        with urllib.request.urlopen(req, timeout=25) as response:
-            res_data = json.loads(response.read().decode("utf-8"))
-            content_text = res_data["choices"][0]["message"]["content"]
-            return json.loads(content_text)
-    except Exception as e:
-        print(f"[Composer] OpenAI LLM call error: {e}")
-    return None
+    raise RuntimeError("Gemini API call failed after one retry") from last_error
 
 
 def validate_composed_message(
@@ -421,24 +423,65 @@ def compose(
     conversation_history: Optional[List[Dict[str, Any]]] = None
 ) -> Dict[str, Any]:
     """
-    Main composition entry point.
-    1. Attempts LLM composition (Anthropic -> OpenAI).
-    2. Validates output against 12 hard rules.
-    3. Fallbacks deterministically to guaranteed high-scoring composition if LLM is unavailable or fails.
+    Main composition entry point using Gemini, with a logged last-resort fallback.
     """
     sys_prompt = build_system_prompt(category, trigger.get("kind", ""))
     usr_prompt = build_user_prompt(category, merchant, trigger, customer, conversation_history)
 
-    # Try Anthropic first
-    result = call_llm_anthropic(sys_prompt, usr_prompt)
-    
-    # Try OpenAI if Anthropic didn't return
-    if not result:
-        result = call_llm_openai(sys_prompt, usr_prompt)
+    prompt = f"{sys_prompt}\n\n{usr_prompt}"
+    required_fields = ("body", "cta", "send_as", "suppression_key", "rationale")
+    expected_send_as = "merchant_on_behalf" if (
+        customer or trigger.get("scope") == "customer" or trigger.get("customer_id")
+    ) else "vera"
 
-    # Validate LLM result
-    if result and validate_composed_message(result, category, merchant, trigger, conversation_history):
-        return result
+    try:
+        for attempt in range(2):
+            retry_prompt = prompt
+            if attempt:
+                retry_prompt += (
+                    "\n\nYour previous response was malformed, failed validation, or included an unsupported price. "
+                    "Correct the issue and return one valid JSON object with only context-supported facts."
+                )
+            raw_result = call_llm_gemini(retry_prompt)
+            try:
+                result = json.loads(raw_result)
+            except json.JSONDecodeError as error:
+                if attempt == 1:
+                    raise ValueError("Gemini returned malformed JSON twice") from error
+                logger.warning("Gemini returned malformed JSON; retrying once")
+                continue
 
-    # Fallback if LLM is not set or failed validation
-    return deterministic_fallback_composer(category, merchant, trigger, customer, conversation_history)
+            valid_contract = (
+                isinstance(result, dict)
+                and all(field in result for field in required_fields)
+                and result.get("cta") in {"binary", "open_ended", "none"}
+                and result.get("send_as") == expected_send_as
+                and validate_composed_message(result, category, merchant, trigger, conversation_history)
+            )
+            if not valid_contract:
+                logger.warning("Gemini response failed composition validation; retrying if possible")
+                continue
+
+            body = result["body"].strip()
+            source_prices = {
+                re.sub(r"\D", "", amount)
+                for amount in re.findall(r"₹\s*([\d,]+)", usr_prompt)
+            }
+            output_prices = {
+                re.sub(r"\D", "", amount)
+                for amount in re.findall(r"₹\s*([\d,]+)", body)
+            }
+            if not output_prices.issubset(source_prices):
+                logger.warning("Gemini response introduced a price absent from context; retrying if possible")
+                continue
+
+            if result["cta"] == "binary" and "?" in body:
+                first_question = body.find("?")
+                body = f"{body[:first_question + 1].rstrip()} Reply YES to proceed."
+            result["body"] = body
+            result["suppression_key"] = trigger.get("suppression_key") or result["suppression_key"]
+            return {field: result[field] for field in required_fields}
+        raise ValueError("Gemini response failed JSON/schema validation after one retry")
+    except Exception:
+        logger.exception("ERROR: using deterministic composition fallback after Gemini failure")
+        return deterministic_fallback_composer(category, merchant, trigger, customer, conversation_history)
