@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
 load_dotenv()
+PORT = int(os.environ.get("PORT", 8080))
 
 from composer import compose
 from conversation_handlers import ConversationState, handle_reply, MERCHANT_AUTO_REPLY_COUNTS
@@ -37,8 +38,28 @@ START_TIME = time.time()
 
 @app.on_event("startup")
 async def log_llm_key_presence():
-    key_status = {"GEMINI_API_KEY": bool(os.getenv("GEMINI_API_KEY"))}
-    print(f"[Startup] LLM key presence (values never logged): {json.dumps(key_status)}", flush=True)
+    required_routes = {
+        ("POST", "/v1/context"),
+        ("POST", "/v1/tick"),
+        ("POST", "/v1/reply"),
+        ("GET", "/v1/healthz"),
+        ("GET", "/v1/metadata"),
+    }
+    registered_routes = sorted(
+        (method, route.path)
+        for route in app.routes
+        for method in getattr(route, "methods", set())
+        if method in {"GET", "POST"} and route.path.startswith("/v1/")
+    )
+    registered_required = sorted(required_routes.intersection(registered_routes))
+    startup_status = {
+        "host": "0.0.0.0",
+        "port": PORT,
+        "GEMINI_API_KEY": bool(os.getenv("GEMINI_API_KEY")),
+        "required_routes_registered": registered_required,
+        "all_required_routes_registered": required_routes.issubset(registered_routes),
+    }
+    print(f"[Startup] {json.dumps(startup_status)}", flush=True)
 
 # In-memory context store: (scope, context_id) -> {"version": int, "payload": dict, "delivered_at": str}
 CONTEXT_STORE: Dict[tuple[str, str], Dict[str, Any]] = {}
@@ -599,5 +620,4 @@ async def teardown_state():
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", 8081))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=PORT)

@@ -52,13 +52,14 @@ To deploy this repository to **Render** and get the public HTTPS URL required fo
    - Log in to [Render Dashboard](https://dashboard.render.com/).
    - Click **New +** -> **Web Service**.
    - Connect your GitHub repository.
+   - Set **Root Directory** to `magicpin` so Render builds this Gemini-backed service rather than the legacy files at the repository root.
 3. **Configure Build Settings**:
    - **Environment**: `Docker` (Render automatically detects `Dockerfile`).
    - **Region**: Singapore or Frankfurt (or nearest region).
    - **Branch**: `main`.
 4. **Environment Variables**:
    - Add `GEMINI_API_KEY` as an environment variable. The deterministic fallback is used only after Gemini calls fail and logs an ERROR-level message.
-   - `PORT`: `8081` (or leave default; the container uses the platform-provided `PORT` when set).
+   - Render injects `PORT` at runtime; the local default is `8080`. Set `LLM_MODEL` only if you want to override `gemini-2.0-flash`.
 5. **Deploy & Copy Public URL**:
    - Click **Create Web Service**.
    - Render will build the Docker container and deploy the app.
